@@ -48,10 +48,21 @@ export interface ReconciliationRow {
   excelRow: number; // 1-indexed row in sheet
   values: ProposedValues;
   existing: Partial<ProposedValues>;
-  conflicts: string[];
+  conflicts: (keyof ProposedValues)[];
   hasData: boolean;
   applied: boolean;
 }
+
+export const FIELD_LABELS: Record<keyof ProposedValues, string> = {
+  zNumber: "N° du Z",
+  totalTVAC: "Total TVAC",
+  total21: "Total 21%",
+  total12: "Total 12%",
+  total6: "Total 6%",
+  cartes: "Paiements cartes",
+  virement: "Virement client",
+  cash: "CASH",
+};
 
 const MONTHS_FR = [
   "JANVIER", "FEVRIER", "MARS", "AVRIL", "MAI", "JUIN",
@@ -259,8 +270,10 @@ const FIELD_TOLERANCE = 0.005;
 function isEmpty(v: unknown): boolean {
   if (v == null || v === "") return true;
   if (typeof v === "number") return v === 0;
+  // Treat "0", "0.00", "0,00", "  0 ", etc. as empty
   const n = num(v);
-  return n === 0 && String(v).trim() === "0";
+  if (n === 0) return true;
+  return false;
 }
 
 export function computeReconciliation(
@@ -296,7 +309,7 @@ export function computeReconciliation(
       cash: e.ca?.cash ?? 0,
     };
     const existing: Partial<ProposedValues> = {};
-    const conflicts: string[] = [];
+    const conflicts: (keyof ProposedValues)[] = [];
     const check = (key: keyof ProposedValues, col: number) => {
       if (col < 0) return;
       const cur = cellVal(ws.getRow(targetRow).getCell(col));

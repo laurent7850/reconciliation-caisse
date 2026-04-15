@@ -68,4 +68,30 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .kpi .value { font-size: 1.4rem; font-weight: 700; margin-top: 4px; }
 details { background: var(--card); border-radius: 8px; padding: 12px; margin-top: 12px; }
 summary { cursor: pointer; font-weight: 600; }
+
+.conflicts-panel { border-left: 4px solid var(--err); }
+.conflicts-intro { color: var(--muted); font-size: .9rem; margin: 12px 0 16px; line-height: 1.5; }
+.conflicts-list { display: flex; flex-direction: column; gap: 16px; }
+.conflict-card {
+  background: #0f172a;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+.conflict-header { font-size: 1rem; margin-bottom: 10px; }
+.conflict-table { width: 100%; font-size: .9rem; }
+.conflict-table th { font-size: .7rem; text-transform: uppercase; color: var(--muted); }
+.conflict-table td { padding: 8px 10px; }
+.conflict-table .val-recap {
+  color: var(--err);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  background: rgba(239,68,68,.08);
+}
+.conflict-table .val-z {
+  color: var(--ok);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  background: rgba(34,197,94,.08);
+}
 code { background: #0f172a; padding: 2px 6px; border-radius: 4px; font-size: .85em; }

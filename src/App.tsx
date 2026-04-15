@@ -6,13 +6,25 @@ import {
   cloneWorkbook,
   computeReconciliation,
   downloadWorkbook,
+  FIELD_LABELS,
   loadWorkbook,
   parseCA,
   parseReportZ,
   type CAData,
+  type ProposedValues,
   type ReconciliationRow,
   type ZData,
 } from "./reconcile";
+
+function fmt(k: keyof ProposedValues, v: number): string {
+  if (k === "zNumber") return String(v);
+  return v.toLocaleString("fr-BE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " €";
+}
+
+function conflictExplanation(k: keyof ProposedValues): string {
+  if (k === "zNumber") return "le numéro de Z saisi dans le récap ne correspond pas au rapport importé";
+  return "la valeur saisie dans le récap ne correspond pas au rapport Z";
+}
 
 type Kind = "recap" | "z" | "ca" | "other";
 
@@ -232,18 +244,49 @@ export default function App() {
           </div>
 
           {rows.some((r) => r.conflicts.length > 0) && (
-            <details open>
-              <summary>Détail des conflits</summary>
-              <ul>
+            <details open className="conflicts-panel">
+              <summary>
+                ⚠ {rows.filter((r) => r.conflicts.length > 0).length} conflit(s) détecté(s) — à vérifier manuellement
+              </summary>
+              <p className="conflicts-intro">
+                Les cellules ci-dessous contiennent déjà une valeur dans ton récap, différente de celle du rapport Z.
+                <strong> Elles n'ont PAS été modifiées.</strong> Pour chaque ligne, vérifie qui a raison :
+                si le récap est faux, corrige-le manuellement (ou vide la cellule puis relance l'import).
+              </p>
+              <div className="conflicts-list">
                 {rows.filter((r) => r.conflicts.length > 0).map((r) => (
-                  <li key={"c-" + r.zNumber}>
-                    <strong>{r.monthLabel} jour {r.day} (Z {r.zNumber})</strong> —
-                    {r.conflicts.map((k) => (
-                      <span key={k}> <code>{k}</code>: récap <strong>{String(r.existing[k as keyof typeof r.existing] ?? "-")}</strong> vs Z <strong>{String((r.values as unknown as Record<string, number>)[k])}</strong></span>
-                    ))}
-                  </li>
+                  <div key={"c-" + r.zNumber} className="conflict-card">
+                    <div className="conflict-header">
+                      📅 <strong>{r.monthLabel}</strong> — jour <strong>{r.day}</strong>{" "}
+                      <span style={{ color: "var(--muted)" }}>
+                        (Z {r.zNumber} du {r.dateLabel})
+                      </span>
+                    </div>
+                    <table className="conflict-table">
+                      <thead>
+                        <tr>
+                          <th>Champ</th>
+                          <th>Dans ton récap</th>
+                          <th>Dans le rapport Z</th>
+                          <th>Remarque</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {r.conflicts.map((k) => (
+                          <tr key={k}>
+                            <td><strong>{FIELD_LABELS[k]}</strong></td>
+                            <td className="val-recap">{fmt(k, r.existing[k] as number)}</td>
+                            <td className="val-z">{fmt(k, r.values[k])}</td>
+                            <td style={{ color: "var(--muted)", fontSize: ".85em" }}>
+                              {conflictExplanation(k)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 ))}
-              </ul>
+              </div>
             </details>
           )}
         </>
