@@ -1,4 +1,4 @@
-import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 
 // ---------- Types ----------
 export interface ZData {
@@ -23,11 +23,21 @@ export interface CAData {
 export interface ZEntry {
   zNumber: number;
   day: number;
-  monthIndex: number; // 0-11
+  monthIndex: number;
   monthLabel: string;
   dateLabel: string;
   report: ZData;
   ca: CAData | null;
+}
+export interface ProposedValues {
+  zNumber: number;
+  totalTVAC: number;
+  total21: number;
+  total12: number;
+  total6: number;
+  cartes: number;
+  virement: number;
+  cash: number;
 }
 export interface ReconciliationRow {
   zNumber: number;
@@ -35,72 +45,44 @@ export interface ReconciliationRow {
   monthLabel: string;
   dateLabel: string;
   sheetName: string;
-  rowIndex: number; // row index in sheet (0-based)
-  values: {
-    zNumber: number;
-    totalTVAC: number;
-    total21: number;
-    total12: number;
-    total6: number;
-    cartes: number;
-    virement: number;
-    cash: number;
-  };
-  existing: Partial<ReconciliationRow["values"]>;
-  conflicts: string[]; // field keys that already contain a value differing from proposed
-  hasData: boolean; // the target row already has any non-zero/non-null data
+  excelRow: number; // 1-indexed row in sheet
+  values: ProposedValues;
+  existing: Partial<ProposedValues>;
+  conflicts: string[];
+  hasData: boolean;
   applied: boolean;
 }
 
-// ---------- Month/sheet helpers ----------
 const MONTHS_FR = [
-  "JANVIER",
-  "FEVRIER",
-  "MARS",
-  "AVRIL",
-  "MAI",
-  "JUIN",
-  "JUILLET",
-  "AOUT",
-  "SEPTEMBRE",
-  "OCTOBRE",
-  "NOVEMBRE",
-  "DECEMBRE",
+  "JANVIER", "FEVRIER", "MARS", "AVRIL", "MAI", "JUIN",
+  "JUILLET", "AOUT", "SEPTEMBRE", "OCTOBRE", "NOVEMBRE", "DECEMBRE",
 ];
 
-export function monthLabelFromIndex(i: number): string {
-  return MONTHS_FR[i];
-}
-
-// Normalize "FEVRIER"/"Février"/"FÉVRIER" → "FEVRIER"
 function normalizeMonth(s: string): string {
-  return s
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toUpperCase()
-    .trim();
+  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().trim();
 }
 
-function findSheetForMonth(wb: XLSX.WorkBook, monthIndex: number): string | null {
+function findSheetForMonth(wb: ExcelJS.Workbook, monthIndex: number): ExcelJS.Worksheet | null {
   const target = MONTHS_FR[monthIndex];
-  for (const name of wb.SheetNames) {
-    if (normalizeMonth(name) === target) return name;
+  for (const ws of wb.worksheets) {
+    if (normalizeMonth(ws.name) === target) return ws;
   }
   return null;
 }
 
-// ---------- Date parsing ----------
-function parseDateFR(s: string): Date {
-  // "04/04/2026 19:03" or "2026/04/04"
+function parseDateFR(s: string | Date | number): Date {
+  if (s instanceof Date) return s;
+  if (typeof s === "number") {
+    // Excel serial date
+    const epoch = new Date(Date.UTC(1899, 11, 30));
+    return new Date(epoch.getTime() + s * 86400000);
+  }
   const str = String(s).trim();
   let m = str.match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2}))?/);
   if (m) {
     return new Date(
-      Number(m[3]),
-      Number(m[2]) - 1,
-      Number(m[1]),
-      m[4] ? Number(m[4]) : 0,
-      m[5] ? Number(m[5]) : 0
+      Number(m[3]), Number(m[2]) - 1, Number(m[1]),
+      m[4] ? Number(m[4]) : 0, m[5] ? Number(m[5]) : 0
     );
   }
   m = str.match(/^(\d{4})\/(\d{2})\/(\d{2})/);
@@ -113,68 +95,91 @@ function parseDateFR(s: string): Date {
 function num(v: unknown): number {
   if (v == null || v === "") return 0;
   if (typeof v === "number") return v;
+  if (typeof v === "object" && v != null && "result" in v) return num((v as { result: unknown }).result);
   const cleaned = String(v).replace(/\s/g, "").replace(",", ".");
   const n = Number(cleaned);
   return Number.isFinite(n) ? n : 0;
 }
 
-// ---------- Parsers ----------
-export function parseReportZ(file: File, rows: unknown[][]): ZData {
-  const header = rows[0] as string[];
-  const data = rows[1] as unknown[];
-  const idx = (k: string) => header.findIndex((h) => String(h).trim().toLowerCase() === k.toLowerCase());
-  const z = Number(data[idx("Rapport Z")]);
-  const openDate = parseDateFR(String(data[idx("Date d'ouverture")]));
-  const closeDate = parseDateFR(String(data[idx("Date de fermeture")]));
+// Convert ExcelJS cell value (may be object with .result, .text, .richText) to simple value
+function cellVal(c: ExcelJS.Cell): unknown {
+  const v = c.value;
+  if (v == null) return null;
+  if (typeof v === "object") {
+    if ("result" in v) return (v as { result: unknown }).result;
+    if ("text" in v) return (v as { text: unknown }).text;
+    if ("richText" in v) return (v as { richText: { text: string }[] }).richText.map(r => r.text).join("");
+  }
+  return v;
+}
+
+function headerText(c: ExcelJS.Cell): string {
+  const v = cellVal(c);
+  return v == null ? "" : String(v).toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+// ---------- Source file parsing ----------
+export async function loadWorkbook(file: File): Promise<ExcelJS.Workbook> {
+  const buf = await file.arrayBuffer();
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buf);
+  return wb;
+}
+
+function findHeaderIndex(ws: ExcelJS.Worksheet, headerRow: number, key: string): number {
+  const row = ws.getRow(headerRow);
+  for (let c = 1; c <= row.cellCount; c++) {
+    if (headerText(row.getCell(c)) === key.toLowerCase()) return c;
+  }
+  return -1;
+}
+
+export async function parseReportZ(file: File): Promise<ZData> {
+  const wb = await loadWorkbook(file);
+  const ws = wb.worksheets[0];
+  const find = (k: string) => findHeaderIndex(ws, 1, k);
+  const row = ws.getRow(2);
+  const get = (k: string) => cellVal(row.getCell(find(k)));
+  const zNumber = Number(get("Rapport Z"));
+  const openDate = parseDateFR(get("Date d'ouverture") as string);
+  const closeDate = parseDateFR(get("Date de fermeture") as string);
   return {
-    zNumber: z,
+    zNumber,
     openDate,
     closeDate,
-    caTTC: num(data[idx("CA TTC")]),
-    ttc21: num(data[idx("TTC 21%")]),
-    ttc12: num(data[idx("TTC 12%")]),
-    ttc6: num(data[idx("TTC 6%")]),
-    tickets: num(data[idx("Tickets")]),
+    caTTC: num(get("CA TTC")),
+    ttc21: num(get("TTC 21%")),
+    ttc12: num(get("TTC 12%")),
+    ttc6: num(get("TTC 6%")),
+    tickets: num(get("Tickets")),
     sourceFile: file.name,
   };
 }
 
-export function parseCA(file: File, rows: unknown[][]): CAData {
-  const header = rows[0] as string[];
-  const data = rows[1] as unknown[];
-  const idx = (k: string) => header.findIndex((h) => String(h).trim().toLowerCase() === k.toLowerCase());
+export async function parseCA(file: File): Promise<CAData> {
+  const wb = await loadWorkbook(file);
+  const ws = wb.worksheets[0];
+  const find = (k: string) => findHeaderIndex(ws, 1, k);
+  const row = ws.getRow(2);
+  const get = (k: string) => cellVal(row.getCell(find(k)));
   return {
-    // CA file doesn't contain Z number — we'll match by date/filename later
     zNumber: NaN,
-    date: parseDateFR(String(data[idx("Date")])),
-    cash: num(data[idx("Cash")]),
-    carteBanque: num(data[idx("Carte banque")]),
-    virementBancaire: num(data[idx("Virement bancaire")]),
+    date: parseDateFR(get("Date") as string),
+    cash: num(get("Cash")),
+    carteBanque: num(get("Carte banque")),
+    virementBancaire: num(get("Virement bancaire")),
     sourceFile: file.name,
   };
 }
 
-// Filename pattern: ReportZStats_1_442.xlsx / CA_1_442.xlsx
 export function zFromFilename(name: string): number | null {
   const m = name.match(/_(\d+)\.xlsx?$/i);
   return m ? Number(m[1]) : null;
 }
 
-// ---------- Recap structure ----------
-/**
- * Each month sheet has:
- * row 0: title row ("JANVIER", "SK", ...)
- * row 1: headers ("Jour", "Z N°", "TOTAL TVAC", "TOTAL 21% TVAC", "TOTAL 12% TVAC",
- *                 "TOTAL 6% TVAC", "Paiements cartes", ["BON CADEAU"?],
- *                 "Virement client resto sur le compte", "Dépôt Cash - 58000",
- *                 "FOURNISSEURS", "Montant", [TOTAL CAISSE header moved around], "CASH")
- * rows 2..N : 1 row per day (col 0 = day number)
- *
- * We'll detect columns by header matching, tolerating shifts.
- */
+// ---------- Layout detection on a recap sheet ----------
 export interface SheetLayout {
-  sheetName: string;
-  headerRow: number; // usually 1
+  headerRow: number;
   colJour: number;
   colZ: number;
   colTVAC: number;
@@ -183,58 +188,50 @@ export interface SheetLayout {
   col6: number;
   colCartes: number;
   colVirement: number;
-  colCash: number; // "CASH" column
+  colCash: number;
 }
 
-function headerMatch(h: unknown, keys: string[]): boolean {
-  if (h == null) return false;
-  const raw = String(h).toLowerCase().replace(/\s+/g, " ").trim();
-  return keys.some((k) => raw.includes(k.toLowerCase()));
+function headerMatch(ws: ExcelJS.Worksheet, row: number, keys: string[]): number {
+  const r = ws.getRow(row);
+  for (let c = 1; c <= Math.max(r.cellCount, 30); c++) {
+    const t = headerText(r.getCell(c));
+    if (t && keys.some(k => t.includes(k.toLowerCase()))) return c;
+  }
+  return -1;
 }
 
-export function detectLayout(ws: XLSX.WorkSheet, sheetName: string): SheetLayout | null {
-  const data = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: null });
-  const headerRowIdx = 1;
-  const header = data[headerRowIdx];
-  if (!header) return null;
-
-  const find = (keys: string[]): number =>
-    header.findIndex((h) => headerMatch(h, keys));
-
+export function detectLayout(ws: ExcelJS.Worksheet): SheetLayout | null {
+  const headerRow = 2; // row 1 = title, row 2 = headers
   const layout: SheetLayout = {
-    sheetName,
-    headerRow: headerRowIdx,
-    colJour: find(["jour"]),
-    colZ: find(["z n"]),
-    colTVAC: find(["total tvac"]),
-    col21: find(["total 21"]),
-    col12: find(["total 12"]),
-    col6: find(["total 6"]),
-    colCartes: find(["paiements cartes", "paiement cartes"]),
-    colVirement: find(["virement client"]),
+    headerRow,
+    colJour: headerMatch(ws, headerRow, ["jour"]),
+    colZ: headerMatch(ws, headerRow, ["z n"]),
+    colTVAC: headerMatch(ws, headerRow, ["total tvac"]),
+    col21: headerMatch(ws, headerRow, ["total 21"]),
+    col12: headerMatch(ws, headerRow, ["total 12"]),
+    col6: headerMatch(ws, headerRow, ["total 6"]),
+    colCartes: headerMatch(ws, headerRow, ["paiements cartes", "paiement cartes"]),
+    colVirement: headerMatch(ws, headerRow, ["virement client"]),
     colCash: -1,
   };
 
-  // CASH column is tricky: sometimes a header cell like "CASH" is in the TITLE row (row 0)
-  // or in the header row (row 1). Scan both.
-  const scanCash = (row: unknown[] | undefined): number =>
-    row ? row.findIndex((h) => h != null && String(h).toUpperCase().trim() === "CASH") : -1;
-  let cashCol = scanCash(data[headerRowIdx]);
-  if (cashCol < 0) cashCol = scanCash(data[0]);
-  layout.colCash = cashCol;
+  // Cash column: cell whose value equals exactly "CASH" (row 1 or row 2)
+  const scanCash = (rowNum: number): number => {
+    const r = ws.getRow(rowNum);
+    for (let c = 1; c <= Math.max(r.cellCount, 30); c++) {
+      const v = cellVal(r.getCell(c));
+      if (v != null && String(v).toUpperCase().trim() === "CASH") return c;
+    }
+    return -1;
+  };
+  layout.colCash = scanCash(headerRow);
+  if (layout.colCash < 0) layout.colCash = scanCash(1);
 
-  // Minimal sanity: we need jour, z, tvac at least
   if (layout.colJour < 0 || layout.colZ < 0 || layout.colTVAC < 0) return null;
   return layout;
 }
 
-// ---------- Reconciliation logic ----------
-export interface ReconcileInput {
-  recapFile: File;
-  recapWB: XLSX.WorkBook;
-  entries: ZEntry[]; // merged Z+CA entries
-}
-
+// ---------- Build entries & reconcile ----------
 export function buildEntries(zFiles: ZData[], caFiles: CAData[]): ZEntry[] {
   const caByZ = new Map<number, CAData>();
   const caByDate = new Map<string, CAData>();
@@ -243,11 +240,8 @@ export function buildEntries(zFiles: ZData[], caFiles: CAData[]): ZEntry[] {
     if (z != null) caByZ.set(z, ca);
     caByDate.set(ca.date.toISOString().slice(0, 10), ca);
   }
-  return zFiles.map((z) => {
-    const ca =
-      caByZ.get(z.zNumber) ??
-      caByDate.get(z.openDate.toISOString().slice(0, 10)) ??
-      null;
+  return zFiles.map(z => {
+    const ca = caByZ.get(z.zNumber) ?? caByDate.get(z.openDate.toISOString().slice(0, 10)) ?? null;
     return {
       zNumber: z.zNumber,
       day: z.openDate.getDate(),
@@ -260,7 +254,7 @@ export function buildEntries(zFiles: ZData[], caFiles: CAData[]): ZEntry[] {
   });
 }
 
-const FIELD_TOLERANCE = 0.005; // 0.5 cent
+const FIELD_TOLERANCE = 0.005;
 
 function isEmpty(v: unknown): boolean {
   if (v == null || v === "") return true;
@@ -271,23 +265,27 @@ function isEmpty(v: unknown): boolean {
 
 export function computeReconciliation(
   entries: ZEntry[],
-  wb: XLSX.WorkBook
+  wb: ExcelJS.Workbook
 ): ReconciliationRow[] {
   const out: ReconciliationRow[] = [];
   for (const e of entries) {
-    const sheetName = findSheetForMonth(wb, e.monthIndex);
-    if (!sheetName) continue;
-    const ws = wb.Sheets[sheetName];
-    const layout = detectLayout(ws, sheetName);
+    const ws = findSheetForMonth(wb, e.monthIndex);
+    if (!ws) continue;
+    const layout = detectLayout(ws);
     if (!layout) continue;
-    const rows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: null });
-    // Find row where colJour == e.day
-    const rowIdx = rows.findIndex(
-      (r, i) => i > layout.headerRow && Number(r?.[layout.colJour]) === e.day
-    );
-    if (rowIdx < 0) continue;
-    const row = rows[rowIdx];
-    const proposed = {
+    // Find row where col Jour value equals e.day
+    let targetRow = -1;
+    const maxRow = Math.min(ws.actualRowCount || ws.rowCount, 100);
+    for (let r = layout.headerRow + 1; r <= maxRow; r++) {
+      const dv = cellVal(ws.getRow(r).getCell(layout.colJour));
+      if (dv != null && Number(dv) === e.day) {
+        targetRow = r;
+        break;
+      }
+    }
+    if (targetRow < 0) continue;
+
+    const proposed: ProposedValues = {
       zNumber: e.zNumber,
       totalTVAC: e.report.caTTC,
       total21: e.report.ttc21,
@@ -297,16 +295,14 @@ export function computeReconciliation(
       virement: e.ca?.virementBancaire ?? 0,
       cash: e.ca?.cash ?? 0,
     };
-    const existing: Partial<typeof proposed> = {};
+    const existing: Partial<ProposedValues> = {};
     const conflicts: string[] = [];
-    const check = (key: keyof typeof proposed, colIdx: number) => {
-      if (colIdx < 0) return;
-      const cur = row[colIdx];
+    const check = (key: keyof ProposedValues, col: number) => {
+      if (col < 0) return;
+      const cur = cellVal(ws.getRow(targetRow).getCell(col));
       if (!isEmpty(cur)) {
         existing[key] = num(cur);
-        if (Math.abs(num(cur) - proposed[key]) > FIELD_TOLERANCE) {
-          conflicts.push(key);
-        }
+        if (Math.abs(num(cur) - proposed[key]) > FIELD_TOLERANCE) conflicts.push(key);
       }
     };
     check("zNumber", layout.colZ);
@@ -317,18 +313,18 @@ export function computeReconciliation(
     check("cartes", layout.colCartes);
     check("virement", layout.colVirement);
     check("cash", layout.colCash);
-    const hasData = Object.keys(existing).length > 0;
+
     out.push({
       zNumber: e.zNumber,
       day: e.day,
       monthLabel: e.monthLabel,
       dateLabel: e.dateLabel,
-      sheetName,
-      rowIndex: rowIdx,
+      sheetName: ws.name,
+      excelRow: targetRow,
       values: proposed,
       existing,
       conflicts,
-      hasData,
+      hasData: Object.keys(existing).length > 0,
       applied: false,
     });
   }
@@ -336,23 +332,21 @@ export function computeReconciliation(
 }
 
 /**
- * Apply proposals to workbook.
- * Policy: never overwrite a non-empty cell. Return the list of rows with final "applied" flag.
+ * Apply reconciliation in-place. Only writes to cells that are empty.
+ * Preserves all formatting, colors, merges, column widths — ExcelJS keeps existing cell styles.
  */
-export function applyReconciliation(
-  wb: XLSX.WorkBook,
-  rows: ReconciliationRow[]
-): ReconciliationRow[] {
+export function applyReconciliation(wb: ExcelJS.Workbook, rows: ReconciliationRow[]): ReconciliationRow[] {
   for (const r of rows) {
-    const ws = wb.Sheets[r.sheetName];
-    const layout = detectLayout(ws, r.sheetName);
+    const ws = wb.getWorksheet(r.sheetName);
+    if (!ws) continue;
+    const layout = detectLayout(ws);
     if (!layout) continue;
-    const data = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: null });
-    const row = data[r.rowIndex] ?? [];
-    const writeIfEmpty = (colIdx: number, value: number) => {
-      if (colIdx < 0) return;
-      if (isEmpty(row[colIdx])) {
-        row[colIdx] = value;
+    const row = ws.getRow(r.excelRow);
+    const writeIfEmpty = (col: number, value: number) => {
+      if (col < 0) return;
+      const cell = row.getCell(col);
+      if (isEmpty(cellVal(cell))) {
+        cell.value = value;
       }
     };
     writeIfEmpty(layout.colZ, r.values.zNumber);
@@ -363,29 +357,30 @@ export function applyReconciliation(
     writeIfEmpty(layout.colCartes, r.values.cartes);
     writeIfEmpty(layout.colVirement, r.values.virement);
     writeIfEmpty(layout.colCash, r.values.cash);
-    data[r.rowIndex] = row;
-    // Rebuild sheet while preserving other rows as-is
-    const newWs = XLSX.utils.aoa_to_sheet(data);
-    // Keep original !ref and column widths if present
-    if (ws["!cols"]) newWs["!cols"] = ws["!cols"];
-    if (ws["!merges"]) newWs["!merges"] = ws["!merges"];
-    wb.Sheets[r.sheetName] = newWs;
+    row.commit();
     r.applied = true;
   }
   return rows;
 }
 
-export async function readWorkbook(file: File): Promise<XLSX.WorkBook> {
-  const buf = await file.arrayBuffer();
-  return XLSX.read(buf, { cellDates: false });
+export async function downloadWorkbook(wb: ExcelJS.Workbook, filename: string): Promise<void> {
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
-export async function readSheetAOA(file: File): Promise<unknown[][]> {
-  const wb = await readWorkbook(file);
-  const first = wb.Sheets[wb.SheetNames[0]];
-  return XLSX.utils.sheet_to_json<unknown[]>(first, { header: 1, defval: null });
-}
-
-export function downloadWorkbook(wb: XLSX.WorkBook, filename: string) {
-  XLSX.writeFile(wb, filename, { bookType: "xlsx" });
+export async function cloneWorkbook(src: ExcelJS.Workbook): Promise<ExcelJS.Workbook> {
+  const buf = await src.xlsx.writeBuffer();
+  const dst = new ExcelJS.Workbook();
+  await dst.xlsx.load(buf as ArrayBuffer);
+  return dst;
 }
