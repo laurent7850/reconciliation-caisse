@@ -1,0 +1,31 @@
+services:
+  web:
+    build: .
+    image: reconciliation-caisse:latest
+    container_name: reconciliation-caisse
+    restart: unless-stopped
+    networks:
+      - default
+      - root_default
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=root_default"
+      # HTTPS router
+      - "traefik.http.routers.reconciliation.rule=Host(`caisses.distr-action.com`)"
+      - "traefik.http.routers.reconciliation.entrypoints=websecure"
+      - "traefik.http.routers.reconciliation.tls=true"
+      - "traefik.http.routers.reconciliation.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.reconciliation.middlewares=reconciliation-auth"
+      - "traefik.http.services.reconciliation.loadbalancer.server.port=80"
+      # Basic auth middleware (apr1 hash, $ doubled for compose)
+      - "traefik.http.middlewares.reconciliation-auth.basicauth.users=admin:$$apr1$$g8Sb3RxG$$P7RdNguq3WOX.CGWwFpwJ."
+      # HTTP → HTTPS redirect
+      - "traefik.http.routers.reconciliation-http.rule=Host(`caisses.distr-action.com`)"
+      - "traefik.http.routers.reconciliation-http.entrypoints=web"
+      - "traefik.http.routers.reconciliation-http.middlewares=reconciliation-redirect"
+      - "traefik.http.middlewares.reconciliation-redirect.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.reconciliation-redirect.redirectscheme.permanent=true"
+
+networks:
+  root_default:
+    external: true
