@@ -1,11 +1,10 @@
 import { useCallback, useMemo, useState } from "react";
 import ExcelJS from "exceljs";
 import {
-  applyReconciliation,
   buildEntries,
-  cloneWorkbook,
+  buildPatches,
   computeReconciliation,
-  downloadWorkbook,
+  downloadPatched,
   FIELD_LABELS,
   loadWorkbook,
   parseCA,
@@ -39,6 +38,7 @@ function classifyFile(f: File): Kind {
 export default function App() {
   const [recapFile, setRecapFile] = useState<File | null>(null);
   const [recapWB, setRecapWB] = useState<ExcelJS.Workbook | null>(null);
+  const [recapBytes, setRecapBytes] = useState<ArrayBuffer | null>(null);
   const [zFiles, setZFiles] = useState<ZData[]>([]);
   const [caFiles, setCaFiles] = useState<CAData[]>([]);
   const [rows, setRows] = useState<ReconciliationRow[]>([]);
@@ -49,6 +49,7 @@ export default function App() {
   const reset = () => {
     setRecapFile(null);
     setRecapWB(null);
+    setRecapBytes(null);
     setZFiles([]);
     setCaFiles([]);
     setRows([]);
@@ -64,8 +65,11 @@ export default function App() {
         if (where === "recap") {
           const f = arr[0];
           if (!f) return;
-          const wb = await loadWorkbook(f);
+          const bytes = await f.arrayBuffer();
+          // load a copy so the original ArrayBuffer is preserved for surgical patching
+          const wb = await loadWorkbook(new File([bytes.slice(0)], f.name));
           setRecapFile(f);
+          setRecapBytes(bytes);
           setRecapWB(wb);
           return;
         }
@@ -109,18 +113,17 @@ export default function App() {
   };
 
   const download = async () => {
-    if (!recapWB) return;
+    if (!recapWB || !recapBytes) return;
     setBusy(true);
     try {
-      // Clone workbook to avoid mutating the in-memory preview
-      const clone = await cloneWorkbook(recapWB);
-      const applied = applyReconciliation(clone, rows);
+      const patches = buildPatches(recapWB, rows);
       const stamp = new Date().toISOString().slice(0, 10);
       const fname = recapFile
         ? recapFile.name.replace(/\.xlsx?$/i, "") + `-reconcilie-${stamp}.xlsx`
         : `recap-reconcilie-${stamp}.xlsx`;
-      await downloadWorkbook(clone, fname);
-      setRows(applied.map((r) => ({ ...r })));
+      // Pass a fresh copy of the bytes (JSZip may consume them)
+      await downloadPatched(recapBytes.slice(0), patches, fname);
+      setRows(rows.map((r) => ({ ...r })));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

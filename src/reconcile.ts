@@ -344,41 +344,55 @@ export function computeReconciliation(
   return out;
 }
 
+import { patchXlsx, type Patch } from "./xlsxPatcher";
+
 /**
- * Apply reconciliation in-place. Only writes to cells that are empty.
- * Preserves all formatting, colors, merges, column widths — ExcelJS keeps existing cell styles.
+ * Build the list of surgical patches (only for empty target cells).
+ * Also marks rows.applied = true for tracking.
  */
-export function applyReconciliation(wb: ExcelJS.Workbook, rows: ReconciliationRow[]): ReconciliationRow[] {
+export function buildPatches(
+  wb: ExcelJS.Workbook,
+  rows: ReconciliationRow[]
+): Patch[] {
+  const patches: Patch[] = [];
   for (const r of rows) {
     const ws = wb.getWorksheet(r.sheetName);
     if (!ws) continue;
     const layout = detectLayout(ws);
     if (!layout) continue;
-    const row = ws.getRow(r.excelRow);
-    const writeIfEmpty = (col: number, value: number) => {
+    const excelRow = ws.getRow(r.excelRow);
+    const push = (col: number, value: number) => {
       if (col < 0) return;
-      const cell = row.getCell(col);
-      if (isEmpty(cellVal(cell))) {
-        cell.value = value;
+      const cur = cellVal(excelRow.getCell(col));
+      if (isEmpty(cur)) {
+        patches.push({ sheetName: r.sheetName, row: r.excelRow, col, value });
       }
     };
-    writeIfEmpty(layout.colZ, r.values.zNumber);
-    writeIfEmpty(layout.colTVAC, r.values.totalTVAC);
-    writeIfEmpty(layout.col21, r.values.total21);
-    writeIfEmpty(layout.col12, r.values.total12);
-    writeIfEmpty(layout.col6, r.values.total6);
-    writeIfEmpty(layout.colCartes, r.values.cartes);
-    writeIfEmpty(layout.colVirement, r.values.virement);
-    writeIfEmpty(layout.colCash, r.values.cash);
-    row.commit();
+    push(layout.colZ, r.values.zNumber);
+    push(layout.colTVAC, r.values.totalTVAC);
+    push(layout.col21, r.values.total21);
+    push(layout.col12, r.values.total12);
+    push(layout.col6, r.values.total6);
+    push(layout.colCartes, r.values.cartes);
+    push(layout.colVirement, r.values.virement);
+    push(layout.colCash, r.values.cash);
     r.applied = true;
   }
-  return rows;
+  return patches;
 }
 
-export async function downloadWorkbook(wb: ExcelJS.Workbook, filename: string): Promise<void> {
-  const buf = await wb.xlsx.writeBuffer();
-  const blob = new Blob([buf], {
+/**
+ * Patches the original XLSX bytes surgically and triggers browser download.
+ * The original file is never re-serialized — only targeted cell values are
+ * changed inside the ZIP/XML. Everything else is preserved bit-for-bit.
+ */
+export async function downloadPatched(
+  originalBytes: ArrayBuffer,
+  patches: Patch[],
+  filename: string
+): Promise<void> {
+  const outBuf = await patchXlsx(originalBytes, patches);
+  const blob = new Blob([outBuf], {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   });
   const url = URL.createObjectURL(blob);
@@ -389,11 +403,4 @@ export async function downloadWorkbook(wb: ExcelJS.Workbook, filename: string): 
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-}
-
-export async function cloneWorkbook(src: ExcelJS.Workbook): Promise<ExcelJS.Workbook> {
-  const buf = await src.xlsx.writeBuffer();
-  const dst = new ExcelJS.Workbook();
-  await dst.xlsx.load(buf as ArrayBuffer);
-  return dst;
 }
