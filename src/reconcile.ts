@@ -103,6 +103,13 @@ function parseDateFR(s: string | Date | number): Date {
   throw new Error(`Date illisible: ${str}`);
 }
 
+function localDateKey(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 function num(v: unknown): number {
   if (v == null || v === "") return 0;
   if (typeof v === "number") return v;
@@ -184,7 +191,12 @@ export async function parseCA(file: File): Promise<CAData> {
 }
 
 export function zFromFilename(name: string): number | null {
-  const m = name.match(/_(\d+)\.xlsx?$/i);
+  // Tolerates suffixes like " (1)", " - copie", etc. before the extension:
+  //   CA_1_443.xlsx, CA_1_443 (1).xlsx, CA_1_443 - copie.xlsx
+  // Picks the LAST _NNN before .xlsx (skips the cash-register id in CA_1_NNN):
+  // backtracking on \d+ ensures we land on the rightmost token whose tail
+  // contains no further '_'.
+  const m = name.match(/_(\d+)[^_]*\.xlsx?$/i);
   return m ? Number(m[1]) : null;
 }
 
@@ -249,10 +261,10 @@ export function buildEntries(zFiles: ZData[], caFiles: CAData[]): ZEntry[] {
   for (const ca of caFiles) {
     const z = zFromFilename(ca.sourceFile);
     if (z != null) caByZ.set(z, ca);
-    caByDate.set(ca.date.toISOString().slice(0, 10), ca);
+    caByDate.set(localDateKey(ca.date), ca);
   }
   return zFiles.map(z => {
-    const ca = caByZ.get(z.zNumber) ?? caByDate.get(z.openDate.toISOString().slice(0, 10)) ?? null;
+    const ca = caByZ.get(z.zNumber) ?? caByDate.get(localDateKey(z.openDate)) ?? null;
     return {
       zNumber: z.zNumber,
       day: z.openDate.getDate(),
