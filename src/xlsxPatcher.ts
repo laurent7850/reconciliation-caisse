@@ -133,6 +133,23 @@ function compareColLetters(a: string, b: string): number {
 }
 
 /**
+ * Force Excel to recalculate all formulas when the file is opened.
+ * Sets fullCalcOnLoad="1" on <calcPr> in xl/workbook.xml. Without this,
+ * formula cells keep their stale cached <v> after we patch a referenced cell.
+ */
+function forceRecalcOnLoad(wbXml: string): string {
+  if (/<calcPr\b[^>]*\bfullCalcOnLoad="1"/.test(wbXml)) return wbXml;
+  if (/<calcPr\b/.test(wbXml)) {
+    return wbXml.replace(/<calcPr\b([^/>]*)(\/?>)/, (_m, attrs, end) => {
+      const cleaned = attrs.replace(/\s+fullCalcOnLoad="[^"]*"/, "");
+      return `<calcPr${cleaned} fullCalcOnLoad="1"${end}`;
+    });
+  }
+  // No <calcPr> — insert one before </workbook>
+  return wbXml.replace(/<\/workbook>/, '<calcPr fullCalcOnLoad="1"/></workbook>');
+}
+
+/**
  * Apply a list of cell patches to an XLSX ArrayBuffer. Returns new ArrayBuffer.
  * Only the targeted cell values are modified. Everything else (styles, merges,
  * column widths, colors, formulas, drawings, pivot caches...) is left untouched.
@@ -159,6 +176,13 @@ export async function patchXlsx(
     const xml = await zip.file(path)!.async("string");
     const patched = patchSheetXml(xml, ps);
     zip.file(path, patched);
+  }
+
+  // Force formula recalculation on next open so RECAP ANNUEL etc. refresh.
+  const wbFile = zip.file("xl/workbook.xml");
+  if (wbFile) {
+    const wbXml = await wbFile.async("string");
+    zip.file("xl/workbook.xml", forceRecalcOnLoad(wbXml));
   }
 
   // Write ZIP back
