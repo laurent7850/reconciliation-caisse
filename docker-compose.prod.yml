@@ -17,7 +17,7 @@ services:
       - "traefik.http.routers.reconciliation.tls.certresolver=letsencrypt"
       - "traefik.http.routers.reconciliation.middlewares=reconciliation-auth"
       - "traefik.http.services.reconciliation.loadbalancer.server.port=80"
-      - "traefik.http.middlewares.reconciliation-auth.basicauth.users=admin:$$apr1$$g8Sb3RxG$$P7RdNguq3WOX.CGWwFpwJ."
+      - "traefik.http.middlewares.reconciliation-auth.basicauth.users=admin:$$2y$$05$$c7dwU3tceosREMdM5.nlnutFOqp8NqDCqR5WPqIpjp82CkTXIkppO"
       - "traefik.http.routers.reconciliation-http.rule=Host(`caisses.distr-action.com`)"
       - "traefik.http.routers.reconciliation-http.entrypoints=web"
       - "traefik.http.routers.reconciliation-http.middlewares=reconciliation-redirect"
